@@ -134,3 +134,17 @@ dmypy.json
 my-requirements.txt
 my-runners/
 .vscode/settings.json
+
+# Experiment results and data
+exp/
+data/
+*.pt
+*.pth
+
+# Gradio cache
+gradio_cached_examples/
+flagged/
+
+# Temporary files
+*.tmp
+*.bak

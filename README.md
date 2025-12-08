@@ -3,6 +3,29 @@
 [This paper](https://arxiv.org/abs/2108.11667) presents a new text generation method StackMix. StackMix can be
 applied to the standalone task of generating handwritten text based on printed text.
 
+## 🎯 NEW! Web Interface
+
+**Now with easy-to-use web interface!** Train your OCR models through a simple browser interface.
+
+### Quick Start with UI:
+
+1. **Run the interface:**
+   ```bash
+   # Windows (automatic)
+   run_ui.bat
+   
+   # Or manually
+   python app.py
+   ```
+
+2. **Open browser:** `http://localhost:7860`
+
+3. **Start training!** No command line needed!
+
+📖 **Full UI documentation:** See [README_UI.md](README_UI.md) and [QUICKSTART.md](QUICKSTART.md)
+
+---
+
 ## Config file
 Create a new config file need  in ```configs/__init__.py```.
 An individual config file is required for each dataset.
@@ -33,9 +56,23 @@ sample_id,path,stage,text
 
 ## Setup
 
+### Option 1: Using Web Interface (Recommended)
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run web interface
+python app.py
+```
+
+Then open `http://localhost:7860` in your browser!
+
+### Option 2: Command Line
+
 install requirements:
 ```
-pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
+pip install -r requirements.txt
 ```
 
 ## Example run train
