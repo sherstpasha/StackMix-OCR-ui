@@ -5,7 +5,7 @@ applied to the standalone task of generating handwritten text based on printed t
 
 ## 🎯 NEW! Web Interface
 
-**Now with easy-to-use web interface!** Train your OCR models through a simple browser interface.
+**Now with easy-to-use web interface!** Train your OCR models and generate synthetic data through a simple browser interface.
 
 ### Quick Start with UI:
 
@@ -20,9 +20,15 @@ applied to the standalone task of generating handwritten text based on printed t
 
 2. **Open browser:** `http://localhost:7860`
 
-3. **Start training!** No command line needed!
+3. **Two main features:**
+   - **Training Tab:** Train OCR models on custom datasets
+   - **Generation Tab:** Generate synthetic data with StackMix
 
-📖 **Full UI documentation:** See [README_UI.md](README_UI.md) and [QUICKSTART.md](QUICKSTART.md)
+📖 **Documentation:**
+- [QUICKSTART.md](QUICKSTART.md) - Quick start guide
+- [EXAMPLES.md](EXAMPLES.md) - Training examples
+- [GENERATION_GUIDE.md](GENERATION_GUIDE.md) - Data generation guide
+- [GENERATION_EXAMPLES.md](GENERATION_EXAMPLES.md) - Generation usage examples
 
 ---
 

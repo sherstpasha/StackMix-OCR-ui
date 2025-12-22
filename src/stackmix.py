@@ -5,6 +5,8 @@ import json
 import random
 from glob import glob
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 import cv2
 import pandas as pd
@@ -34,7 +36,8 @@ class StackMix:
         #
         self.background_smooth = BackgroundSmoothing(p=p_background_smoothing)
 
-    def prepare_stackmix_dir(self, marking):
+    def prepare_stackmix_dir(self, marking, num_workers=8):
+        """Подготавливает директорию StackMix с токенами (параллельная версия)"""
         train_ids = marking[~marking['stage'].isin(['valid', 'test'])].index.values
         all_masks = {}
         for masks in json.load(open(f'{self.data_dir}/{self.dataset_name}/all_char_masks.json', 'rb')):
@@ -55,52 +58,84 @@ class StackMix:
             pass
         os.makedirs(self.stackmix_dir, exist_ok=True)
 
-        image_ids = [_id for _id, masks in tqdm(all_masks.items())]
+        image_ids = [_id for _id, masks in tqdm(all_masks.items(), desc="Collecting IDs")]
         stackmix_ids = set()
         for ids in marking.loc[image_ids].reset_index()[
             ['sample_id', 'text']
         ].groupby('text').agg(lambda x: list(x)[:50])['sample_id'].values:
             stackmix_ids.update(ids)
 
+        # Фильтруем только нужные id
+        filtered_masks = {_id: masks for _id, masks in all_masks.items() if _id in stackmix_ids}
+        
+        # Потокобезопасные структуры
         mwe_tokens_count = defaultdict(int)
+        mwe_tokens_lock = threading.Lock()
         stackmix_data = []
-        for _id, masks in tqdm(all_masks.items()):
-            if _id not in stackmix_ids:
-                continue
-            image = self.load_image(marking.loc[_id]['path'])
-            text = ''.join([mask['label'] for mask in masks])
-            for n in range(1, self.max_token_size + 1):
-                for i in range(len(text) - n):
-                    span_a, span_b = i, i + n
-                    cut_image, left_x = self.cut_symbol(image, masks[span_a]['x1'], masks[span_b - 1]['x2'], self.angle)
-                    h, w, c = cut_image.shape
-                    if h < 10 or w < 10:
-                        continue
+        stackmix_data_lock = threading.Lock()
+        created_dirs = set()
+        created_dirs_lock = threading.Lock()
+        
+        def process_image(_id, masks):
+            """Обрабатывает одно изображение и возвращает список токенов"""
+            local_results = []
+            try:
+                image = self.load_image(marking.loc[_id]['path'])
+                text = ''.join([mask['label'] for mask in masks])
+                
+                for n in range(1, self.max_token_size + 1):
+                    for i in range(len(text) - n):
+                        span_a, span_b = i, i + n
+                        cut_image, left_x = self.cut_symbol(image, masks[span_a]['x1'], masks[span_b - 1]['x2'], self.angle)
+                        h, w, c = cut_image.shape
+                        if h < 10 or w < 10:
+                            continue
 
-                    cut_image, coef = self.resize_to_h_if_need(cut_image, self.image_h)
-                    cut_image = self.make_img_padding_to_h(cut_image, self.image_h)
-                    cut_image = self.replace_center(cut_image)
-                    left_x = int(round(left_x / coef))
+                        cut_image, coef = self.resize_to_h_if_need(cut_image, self.image_h)
+                        cut_image = self.make_img_padding_to_h(cut_image, self.image_h)
+                        cut_image = self.replace_center(cut_image)
+                        left_x = int(round(left_x / coef))
 
-                    mwe_token = text[i:i + n]
-                    os.makedirs(f'{self.stackmix_dir}/{mwe_token}', exist_ok=True)
-
-                    count = mwe_tokens_count[mwe_token]
-                    if count > 100:
-                        continue
-
-                    path = f'{self.stackmix_dir}/{mwe_token}/{count}.png'
-                    cv2.imwrite(path, cut_image)
-
-                    mwe_tokens_count[mwe_token] += 1
-
-                    stackmix_data.append({
-                        'text': text[i:i + n],
-                        'path': path,
-                        'left_x': left_x,
-                    })
+                        mwe_token = text[i:i + n]
+                        
+                        # Проверяем/создаем директорию потокобезопасно
+                        token_dir = f'{self.stackmix_dir}/{mwe_token}'
+                        with created_dirs_lock:
+                            if mwe_token not in created_dirs:
+                                os.makedirs(token_dir, exist_ok=True)
+                                created_dirs.add(mwe_token)
+                        
+                        # Получаем счетчик потокобезопасно
+                        with mwe_tokens_lock:
+                            count = mwe_tokens_count[mwe_token]
+                            if count > 100:
+                                continue
+                            mwe_tokens_count[mwe_token] += 1
+                        
+                        path = f'{token_dir}/{count}.png'
+                        cv2.imwrite(path, cut_image)
+                        
+                        local_results.append({
+                            'text': mwe_token,
+                            'path': path,
+                            'left_x': left_x,
+                        })
+            except Exception as e:
+                print(f"Error processing {_id}: {e}")
+            return local_results
+        
+        # Параллельная обработка изображений
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(process_image, _id, masks): _id 
+                      for _id, masks in filtered_masks.items()}
+            
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing images"):
+                results = future.result()
+                with stackmix_data_lock:
+                    stackmix_data.extend(results)
 
         stackmix_data = pd.DataFrame(stackmix_data)
+        os.makedirs(f'{self.mwe_tokens_dir}/{self.dataset_name}', exist_ok=True)
         stackmix_data.to_csv(f'{self.mwe_tokens_dir}/{self.dataset_name}/stackmix.csv', index=False)
 
         self.load()

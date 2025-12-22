@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 import pandas as pd
 import json
+import torch
+from configs.base import BaseConfig
 
 # Глобальные переменные для отслеживания процесса
 current_process = None
@@ -129,6 +131,15 @@ def run_training_process(
         
         # Нормализуем пути: заменяем обратные слеши на прямые
         df['path'] = df['path'].str.replace('\\', '/')
+        
+        # ВАЖНО: Удаляем строки с NaN/пустыми текстами
+        df = df.dropna(subset=['text'])
+        df = df[df['text'].astype(str).str.strip() != '']
+        
+        if len(df) == 0:
+            raise ValueError("После фильтрации пустых текстов датасет пуст!")
+        
+        writer.add_text('dataset/info', f'Строк после фильтрации: {len(df)}', 0)
         
         # Собираем уникальные символы из текстов
         all_text = ' '.join(df['text'].astype(str).values)
@@ -501,6 +512,10 @@ def check_dataset(data_dir, marking_csv_path):
     if is_valid:
         df = pd.read_csv(marking_csv_path)
         
+        # Проверяем пустые/NaN текстовые поля
+        nan_count = df['text'].isna().sum()
+        empty_count = (df['text'].astype(str).str.strip() == '').sum()
+        
         train_count = len(df[df['stage'] == 'train'])
         valid_count = len(df[df['stage'] == 'valid'])
         test_count = len(df[df['stage'] == 'test'])
@@ -530,6 +545,18 @@ def check_dataset(data_dir, marking_csv_path):
 3. Используйте прямые слеши (/) или двойные обратные (\\\\) в путях
 """
         
+        # Предупреждение о пустых текстах
+        empty_warning = ""
+        if nan_count > 0 or empty_count > 0:
+            empty_warning = f"""
+**⚠️ ВНИМАНИЕ: Обнаружены пустые тексты!**
+
+- Пустых (NaN): {nan_count}
+- Пустых строк: {empty_count}
+
+Эти строки будут автоматически удалены при обучении.
+"""
+        
         info = f"""
 **Информация о датасете**
 
@@ -541,6 +568,8 @@ def check_dataset(data_dir, marking_csv_path):
 - Valid: {valid_count}
 - Test: {test_count}
 
+{empty_warning}
+
 {missing_warning}
 
 **Первые записи:**
@@ -551,6 +580,304 @@ def check_dataset(data_dir, marking_csv_path):
         return info
     else:
         return f"Ошибка: {message}"
+
+
+def prepare_char_masks(checkpoint_path, data_dir, marking_csv_path, image_w, image_h, batch_size, num_workers):
+    """Подготавливает маски символов из обученной модели"""
+    try:
+        from src.dataset import DatasetRetriever
+        from src.ctc_labeling import CTCLabeling
+        from src.model import get_ocr_model
+        from src.predictor import Predictor
+        from src.char_masks import CharMasks
+        from src import utils
+        from torch.utils.data import SequentialSampler
+        import json
+        
+        # Проверяем checkpoint
+        if not Path(checkpoint_path).exists():
+            return f"Ошибка: Checkpoint не найден: {checkpoint_path}"
+        
+        if not Path(marking_csv_path).exists():
+            return f"Ошибка: marking.csv не найден: {marking_csv_path}"
+        
+        # Загружаем датасет С ИНДЕКСОМ sample_id - это важно!
+        df = pd.read_csv(marking_csv_path, index_col='sample_id')
+        df['path'] = df['path'].str.replace('\\', '/')
+        
+        # ВАЖНО: Удаляем строки с NaN/пустыми текстами
+        df = df.dropna(subset=['text'])
+        df = df[df['text'].astype(str).str.strip() != '']
+        
+        if len(df) == 0:
+            return "Ошибка: После фильтрации пустых текстов датасет пуст!"
+        
+        # Получаем уникальные символы
+        all_chars = set()
+        for text in df['text'].values:
+            all_chars.update(str(text))
+        chars = ''.join(sorted(list(all_chars)))
+        
+        # Создаем конфиг
+        config = BaseConfig(
+            data_dir=data_dir,
+            dataset_name='custom',
+            chars=chars,
+            corpus_name='custom_corpus',
+            image_w=int(image_w),
+            image_h=int(image_h),
+        )
+        
+        # Дополнительные параметры
+        config.params['experiment_name'] = 'char_masks_prep'
+        config.params['experiment_description'] = 'Preparing char masks'
+        config.params['num_epochs'] = 0
+        config.params['bs'] = int(batch_size)
+        config.params['num_workers'] = int(num_workers)
+        
+        device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+        
+        # CTCLabeling
+        ctc_labeling = CTCLabeling(config)
+        
+        # Создаем тренировочный датасет
+        train_df = df[~df['stage'].isin(['valid', 'test'])]
+        train_dataset = DatasetRetriever(train_df, config, ctc_labeling)
+        
+        # Загружаем модель
+        model = get_ocr_model(config)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        model = model.to(device)
+        
+        # DataLoader
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=config['bs'],
+            sampler=SequentialSampler(train_dataset),
+            pin_memory=False,
+            drop_last=False,
+            num_workers=config['num_workers'],
+            collate_fn=utils.kw_collate_fn
+        )
+        
+        # Инференс
+        predictor = Predictor(model, device)
+        train_inference = predictor.run_inference(train_loader)
+        
+        # Создаем маски
+        char_masks = CharMasks(config, ctc_labeling, add=0, blank_add=0)
+        all_masks, bad = char_masks.run(train_inference)
+        
+        # Конвертируем numpy int64 в обычные int для JSON
+        def convert_to_serializable(obj):
+            """Рекурсивно конвертирует numpy типы в Python типы"""
+            if isinstance(obj, dict):
+                return {key: convert_to_serializable(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_serializable(item) for item in obj]
+            elif hasattr(obj, 'item'):  # numpy types
+                return obj.item()
+            return obj
+        
+        all_masks_serializable = convert_to_serializable(all_masks)
+        
+        # Сохраняем в подпапку custom (как ожидает StackMix)
+        output_subdir = Path(data_dir) / 'custom'
+        output_subdir.mkdir(parents=True, exist_ok=True)
+        output_path = output_subdir / 'all_char_masks.json'
+        
+        with open(output_path, 'w') as f:
+            json.dump(all_masks_serializable, f)
+        
+        return f"✓ Маски символов подготовлены!\n\nХорошие маски: {len(all_masks)}\nПлохие маски: {len(bad)}\n\nСохранено: {output_path}"
+        
+    except Exception as e:
+        import traceback
+        return f"Ошибка при подготовке масок:\n{str(e)}\n\n{traceback.format_exc()}"
+
+
+def generate_stackmix_data(data_dir, marking_csv_path, text_file, image_h, output_dir):
+    """Генерирует синтетические данные с помощью StackMix"""
+    try:
+        from src.stackmix import StackMix
+        from src.ctc_labeling import CTCLabeling
+        
+        # Проверяем all_char_masks.json в подпапке custom
+        masks_path = Path(data_dir) / 'custom' / 'all_char_masks.json'
+        if not masks_path.exists():
+            # Проверяем также в корне (на случай старого формата)
+            old_masks_path = Path(data_dir) / 'all_char_masks.json'
+            if old_masks_path.exists():
+                # Копируем в правильное место
+                import shutil
+                masks_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(old_masks_path, masks_path)
+            else:
+                return f"Ошибка: Сначала нужно подготовить маски символов!\n\nФайл не найден: {masks_path}"
+        
+        if not Path(marking_csv_path).exists():
+            return f"Ошибка: marking.csv не найден: {marking_csv_path}"
+        
+        # Создаем mwe_tokens_dir
+        mwe_tokens_dir = Path(output_dir) / 'mwe_tokens'
+        mwe_tokens_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Загружаем разметку С ИНДЕКСОМ sample_id - это важно для StackMix!
+        marking = pd.read_csv(marking_csv_path, index_col='sample_id')
+        marking['path'] = marking['path'].str.replace('\\', '/')
+        
+        # ВАЖНО: Удаляем строки с NaN/пустыми текстами
+        marking = marking.dropna(subset=['text'])
+        marking = marking[marking['text'].astype(str).str.strip() != '']
+        
+        if len(marking) == 0:
+            return "Ошибка: После фильтрации пустых текстов датасет пуст!"
+        
+        # Получаем уникальные символы
+        all_chars = set()
+        for text in marking['text'].values:
+            all_chars.update(str(text))
+        chars = ''.join(sorted(list(all_chars)))
+        
+        # Создаем конфиг для CTCLabeling - используем 'custom' как dataset_name
+        config = BaseConfig(
+            data_dir=data_dir,
+            dataset_name='custom',
+            chars=chars,
+            corpus_name='custom_corpus',
+            image_w=512,
+            image_h=int(image_h),
+        )
+        
+        ctc_labeling = CTCLabeling(config)
+        
+        # Создаем StackMix - используем 'custom' как dataset_name
+        stackmix = StackMix(
+            mwe_tokens_dir=str(mwe_tokens_dir),
+            data_dir=data_dir,
+            dataset_name='custom',
+            image_h=int(image_h),
+            p_background_smoothing=0.1
+        )
+        
+        # Подготавливаем StackMix директорию
+        status = "Подготовка StackMix директории...\n"
+        
+        # Проверяем данные перед вызовом
+        train_records = marking[~marking['stage'].isin(['valid', 'test'])]
+        train_count = len(train_records)
+        status += f"Тренировочных записей: {train_count}\n"
+        
+        if train_count == 0:
+            return "Ошибка: В датасете нет тренировочных записей (stage='train')!\n\nДобавьте строки с stage='train' в marking.csv"
+        
+        # Показываем примеры путей для диагностики
+        sample_paths = train_records['path'].head(3).tolist()
+        status += f"Примеры путей из marking.csv:\n"
+        for p in sample_paths:
+            full_path = Path(data_dir) / p
+            status += f"  - {p} -> существует: {full_path.exists()}\n"
+        status += "\n"
+        
+        try:
+            # Используем многопоточную обработку (num_workers=8)
+            stackmix.prepare_stackmix_dir(marking, num_workers=8)
+            status += "✓ StackMix директория подготовлена\n\n"
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            return f"Ошибка при подготовке StackMix:\n{str(e)}\n\n{error_details}\n\nВозможные причины:\n- Пути к изображениям неверны (проверьте data_dir)\n- Изображения не существуют или недоступны\n- Маски символов некорректны"
+        
+        # Загружаем StackMix данные
+        try:
+            stackmix.load()
+            status += "✓ StackMix данные загружены\n\n"
+            
+            # Проверяем что данные загружены
+            if stackmix.stackmix_data is None or len(stackmix.stackmix_data) == 0:
+                return f"Ошибка: StackMix не создал токены!\n\nПроверьте:\n- Есть ли изображения в тренировочной выборке (stage='train')\n- Правильность путей к изображениям\n- Качество масок символов"
+                
+            status += f"Создано токенов: {len(stackmix.stackmix_data)}\n"
+            status += f"Уникальных токенов: {stackmix.stackmix_data['text'].nunique()}\n\n"
+            
+        except pd.errors.EmptyDataError:
+            return f"Ошибка: stackmix.csv пуст!\n\nStackMix не смог создать токены из изображений.\n\nПроверьте:\n1. В marking.csv есть записи со stage='train'\n2. Пути к изображениям корректны\n3. Изображения существуют и доступны\n4. Маски символов были созданы правильно"
+        except Exception as e:
+            return f"Ошибка при загрузке StackMix данных:\n{str(e)}"
+        
+        # Если есть файл с текстом, загружаем корпус
+        if text_file and Path(text_file).exists():
+            # Копируем файл корпуса во временную директорию
+            corpus_temp = Path(output_dir) / 'corpus_temp.txt'
+            import shutil
+            shutil.copy(text_file, corpus_temp)
+            
+            # Проверяем символы в корпусе
+            corpus_chars = set()
+            with open(text_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    corpus_chars.update(line.strip())
+            
+            # Символы из датасета (маски)
+            dataset_chars = set(chars)
+            
+            # Символы которых нет в датасете
+            missing_chars = corpus_chars - dataset_chars - {'\n', '\r', '\t', ' '}
+            
+            if missing_chars:
+                status += f"⚠️ ВНИМАНИЕ: В корпусе есть символы, которых НЕТ в датасете:\n"
+                status += f"{sorted(missing_chars)}\n\n"
+                status += "Эти символы будут пропущены при генерации.\n"
+                status += "Рекомендация: используйте текст только с символами из вашего датасета.\n\n"
+            
+            stackmix.load_corpus(ctc_labeling, str(corpus_temp))
+            status += f"✓ Корпус загружен: {len(stackmix.corpus)} строк\n\n"
+            
+            # Генерируем примеры
+            gen_dir = Path(output_dir) / 'generated_images'
+            gen_dir.mkdir(parents=True, exist_ok=True)
+            
+            num_samples = min(100, len(stackmix.corpus))
+            status += f"Генерация {num_samples} примеров...\n"
+            
+            import cv2
+            generated = []
+            for i in range(num_samples):
+                try:
+                    text, image = stackmix.run_corpus_stackmix()
+                    if image is not None:
+                        img_path = gen_dir / f'gen_{i:04d}.png'
+                        cv2.imwrite(str(img_path), image)
+                        generated.append({'text': text, 'path': str(img_path.name)})
+                except Exception as e:
+                    continue
+            
+            # Сохраняем разметку
+            gen_marking = pd.DataFrame(generated)
+            marking_path = gen_dir / 'marking.csv'
+            gen_marking.to_csv(marking_path, index=False)
+            
+            status += f"\n✓ Сгенерировано: {len(generated)} изображений\n"
+            status += f"✓ Сохранено в: {gen_dir}\n"
+            status += f"✓ Разметка: {marking_path}"
+            
+        else:
+            status += "Корпус текстов не указан.\n\n"
+            status += "StackMix готов к использованию:\n"
+            status += f"- mwe_tokens_dir: {mwe_tokens_dir}\n"
+            status += "- Для генерации добавьте файл с текстами"
+        
+        return status
+        
+    except Exception as e:
+        import traceback
+        return f"Ошибка при генерации данных:\n{str(e)}\n\n{traceback.format_exc()}"
+
+
+
+
 
 
 # Создаем интерфейс Gradio
@@ -681,7 +1008,20 @@ with gr.Blocks(title="StackMix OCR Training") as app:
         
         # ========== ВКЛАДКА: ГЕНЕРАЦИЯ ==========
         with gr.Tab("Генерация данных"):
-            gr.Markdown("### Генерация синтетических данных с помощью StackMix")
+            gr.Markdown("""
+            ### Генерация синтетических данных с помощью StackMix
+            
+            **Процесс генерации в два шага:**
+            
+            1. **Подготовить маски символов** - извлекает маски отдельных символов из обученной модели
+               - Требуется обученный checkpoint (.pt файл)
+               - Создает файл all_char_masks.json
+               
+            2. **Сгенерировать данные** - создает синтетические изображения текста
+               - Использует маски символов из шага 1
+               - Комбинирует символы для создания новых изображений
+               - Требуется текстовый файл с корпусом для генерации
+            """)
             
             with gr.Row():
                 with gr.Column():
@@ -701,8 +1041,9 @@ with gr.Blocks(title="StackMix OCR Training") as app:
                     )
                     
                     gen_text_file = gr.Textbox(
-                        label="Файл с текстом для генерации (txt/csv)",
-                        placeholder="path/to/text_corpus.txt"
+                        label="Файл с текстом для генерации (txt)",
+                        placeholder="path/to/text_corpus.txt",
+                        info="Текстовый файл, одна строка = одно предложение"
                     )
                     
                 with gr.Column():
@@ -719,10 +1060,10 @@ with gr.Blocks(title="StackMix OCR Training") as app:
             gr.Markdown("---")
             
             with gr.Row():
-                prepare_masks_btn = gr.Button("Подготовить маски символов", variant="primary")
-                generate_data_btn = gr.Button("Сгенерировать данные", variant="primary")
+                prepare_masks_btn = gr.Button("1️⃣ Подготовить маски символов", variant="primary", size="lg")
+                generate_data_btn = gr.Button("2️⃣ Сгенерировать данные", variant="secondary", size="lg")
             
-            gen_status = gr.Textbox(label="Статус генерации", interactive=False, lines=3)
+            gen_status = gr.Textbox(label="Статус генерации", interactive=False, lines=5)
     
     # Привязка обработчиков - ОБУЧЕНИЕ
     check_dataset_btn.click(
@@ -764,12 +1105,20 @@ with gr.Blocks(title="StackMix OCR Training") as app:
     
     # Обработчики для генерации
     prepare_masks_btn.click(
-        fn=lambda: "Функция в разработке",
+        fn=prepare_char_masks,
+        inputs=[
+            gen_checkpoint_path, gen_data_dir, gen_marking_csv,
+            gen_image_w, gen_image_h, gen_batch_size, gen_num_workers
+        ],
         outputs=gen_status
     )
     
     generate_data_btn.click(
-        fn=lambda: "Функция в разработке",
+        fn=generate_stackmix_data,
+        inputs=[
+            gen_data_dir, gen_marking_csv, gen_text_file,
+            gen_image_h, gen_output_dir
+        ],
         outputs=gen_status
     )
 
