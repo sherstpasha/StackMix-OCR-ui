@@ -839,7 +839,6 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
             image_h=int(image_h),
             p_background_smoothing=0.1
         )
-        
         stackmix.load()
         
         status = "=== Генерация изображений ===\n\n"
