@@ -206,6 +206,22 @@ class StackMix:
     def load(self):
         self.stackmix_data = pd.read_csv(f'{self.mwe_tokens_dir}/{self.dataset_name}/stackmix.csv')
         self.stackmix_data['text'] = self.stackmix_data['text'].astype(str)
+        
+        # Исправляем пути к токенам - делаем их относительными к текущему stackmix_dir
+        # Путь в CSV может быть: old_path/custom/custom/токен/0.png
+        # Нам нужно: {self.stackmix_dir}/токен/0.png
+        def fix_path(old_path):
+            # Извлекаем последние 2 компонента: токен/файл.png
+            parts = old_path.replace('\\', '/').split('/')
+            # Ищем паттерн: .../custom/токен/число.png
+            # Берем последние 2 части (токен и файл)
+            if len(parts) >= 2:
+                token_and_file = '/'.join(parts[-2:])
+                return f'{self.stackmix_dir}/{token_and_file}'
+            return old_path
+        
+        self.stackmix_data['path'] = self.stackmix_data['path'].apply(fix_path)
+        
         for max_len in range(3, self.max_token_size+1):
             mwes = sorted([mwe for mwe in self.stackmix_data['text'].unique() if len(mwe) <= max_len])
             self.tokenizers[max_len] = tokenize.MWETokenizer(mwes=mwes, separator='')
