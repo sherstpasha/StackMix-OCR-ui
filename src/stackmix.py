@@ -198,7 +198,7 @@ class StackMix:
 
     def load_corpus(self, ctc_labeling, corpus_path):
         mwe_chars = ''.join(sorted([mwe for mwe in list(self.all_mwe_tokens) if len(mwe) <= 1]))
-        lines = open(corpus_path, 'r').readlines()
+        lines = open(corpus_path, 'r', encoding='utf-8').readlines()
         for line in tqdm(lines):
             line = line.strip()
             line = ctc_labeling.preprocess(line)
