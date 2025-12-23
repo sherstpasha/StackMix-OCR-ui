@@ -16,6 +16,24 @@ from nltk import tokenize
 from albumentations import DualTransform
 
 
+def imread_unicode(path):
+    """Читает изображение с поддержкой Unicode путей (кириллица и т.д.)"""
+    with open(path, 'rb') as f:
+        data = np.frombuffer(f.read(), dtype=np.uint8)
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def imwrite_unicode(path, img):
+    """Сохраняет изображение с поддержкой Unicode путей"""
+    ext = os.path.splitext(path)[1]
+    result, encoded_img = cv2.imencode(ext, img)
+    if result:
+        with open(path, 'wb') as f:
+            f.write(encoded_img)
+        return True
+    return False
+
+
 class StackMix:
 
     def __init__(self, mwe_tokens_dir, data_dir, dataset_name, image_h, p_background_smoothing=0.1):
@@ -113,7 +131,7 @@ class StackMix:
                             mwe_tokens_count[mwe_token] += 1
                         
                         path = f'{token_dir}/{count}.png'
-                        cv2.imwrite(path, cut_image)
+                        imwrite_unicode(path, cut_image)
                         
                         local_results.append({
                             'text': mwe_token,
@@ -172,11 +190,11 @@ class StackMix:
             word_token, (span_a, span_b), token = span
             if image is None:
                 path = random.choice(self.token2path.loc[word_token]['path'])
-                image = cv2.imread(path)
+                image = imread_unicode(path)
                 left_x = self.path2leftx.loc[path]['left_x']  # noqa
             else:
                 path = random.choice(self.token2path.loc[word_token]['path'])
-                stack_image = cv2.imread(path)
+                stack_image = imread_unicode(path)
                 stack_left_x = self.path2leftx.loc[path]['left_x']
                 image = self.stack_images(image, stack_image, self.angle, stack_left_x)
                 left_x = stack_left_x  # noqa
@@ -293,7 +311,7 @@ class StackMix:
         return bg
 
     def load_image(self, path):
-        image = cv2.imread(f'{self.data_dir}/{path}')
+        image = imread_unicode(f'{self.data_dir}/{path}')
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         return image
 

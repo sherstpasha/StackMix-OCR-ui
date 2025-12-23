@@ -13,7 +13,20 @@ from pathlib import Path
 import pandas as pd
 import json
 import torch
+import cv2
+import numpy as np
 from configs.base import BaseConfig
+
+# Утилиты для работы с Unicode путями
+def imwrite_unicode(path, img):
+    """Сохраняет изображение с поддержкой Unicode путей"""
+    ext = os.path.splitext(str(path))[1]
+    result, encoded_img = cv2.imencode(ext, img)
+    if result:
+        with open(path, 'wb') as f:
+            f.write(encoded_img)
+        return True
+    return False
 
 # Глобальные переменные для отслеживания процесса
 current_process = None
@@ -884,7 +897,7 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
                 text, image = stackmix.run_corpus_stackmix()
                 if image is not None:
                     img_path = gen_dir / f'gen_{i:05d}.png'
-                    cv2.imwrite(str(img_path), image)
+                    imwrite_unicode(img_path, image)
                     generated.append({
                         'sample_id': i,
                         'path': f'gen_{i:05d}.png',
