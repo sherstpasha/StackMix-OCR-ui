@@ -813,9 +813,12 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
         from src.ctc_labeling import CTCLabeling
         import cv2
         
-        # Проверяем токены
+        # Автоматически корректируем путь к токенам, если пользователь указал custom на конце
         mwe_tokens_dir = Path(tokens_dir)
-        stackmix_csv = mwe_tokens_dir / 'custom' / 'stackmix.csv'
+        if mwe_tokens_dir.name.lower() == 'custom':
+            mwe_tokens_dir = mwe_tokens_dir.parent
+        real_tokens_dir = mwe_tokens_dir / 'custom'
+        stackmix_csv = real_tokens_dir / 'stackmix.csv'
         
         if not stackmix_csv.exists():
             return f"Ошибка: Сначала создайте токены (Шаг 2)!\n\nФайл не найден: {stackmix_csv}"
@@ -855,6 +858,7 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
         stackmix.load()
         
         status = "=== Генерация изображений ===\n\n"
+        status += f"Путь к токенам: {real_tokens_dir}\n"
         status += f"Загружено токенов: {len(stackmix.stackmix_data)}\n"
         status += f"Уникальных: {stackmix.stackmix_data['text'].nunique()}\n\n"
         
