@@ -860,8 +860,8 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
             status += f"⚠️ В корпусе есть символы, которых нет в датасете:\n"
             status += f"   {sorted(missing_chars)[:20]}{'...' if len(missing_chars) > 20 else ''}\n\n"
         
-        # Загружаем корпус
-        corpus_temp = Path(output_dir) / 'corpus_temp.txt'
+        # Загружаем корпус (копируем во временную директорию рядом с токенами)
+        corpus_temp = mwe_tokens_dir / 'corpus_temp.txt'
         import shutil
         shutil.copy(text_file, corpus_temp)
         
@@ -871,8 +871,8 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
         if len(stackmix.corpus) == 0:
             return status + "Ошибка: В корпусе нет строк с подходящими символами!"
         
-        # Генерируем
-        gen_dir = Path(output_dir) / 'generated_images'
+        # Генерируем (создаем директорию для изображений)
+        gen_dir = Path(output_dir)
         gen_dir.mkdir(parents=True, exist_ok=True)
         
         actual_samples = min(int(num_samples), len(stackmix.corpus))
