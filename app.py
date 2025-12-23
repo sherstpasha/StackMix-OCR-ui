@@ -698,7 +698,7 @@ def prepare_char_masks(checkpoint_path, data_dir, marking_csv_path, image_w, ima
         return f"Ошибка при подготовке масок:\n{str(e)}\n\n{traceback.format_exc()}"
 
 
-def prepare_stackmix_tokens(data_dir, marking_csv_path, image_h, output_dir, num_workers):
+def prepare_stackmix_tokens(data_dir, marking_csv_path, image_h, tokens_dir, num_workers):
     """ШАГ 2: Создаёт токены StackMix из масок символов"""
     try:
         from src.stackmix import StackMix
@@ -720,7 +720,7 @@ def prepare_stackmix_tokens(data_dir, marking_csv_path, image_h, output_dir, num
             return f"Ошибка: marking.csv не найден: {marking_csv_path}"
         
         # Создаем mwe_tokens_dir
-        mwe_tokens_dir = Path(output_dir) / 'mwe_tokens'
+        mwe_tokens_dir = Path(tokens_dir)
         mwe_tokens_dir.mkdir(parents=True, exist_ok=True)
         
         # Загружаем разметку С ИНДЕКСОМ sample_id
@@ -780,6 +780,7 @@ def prepare_stackmix_tokens(data_dir, marking_csv_path, image_h, output_dir, num
             status += f"  - Всего токенов: {len(stackmix.stackmix_data)}\n"
             status += f"  - Уникальных токенов: {stackmix.stackmix_data['text'].nunique()}\n"
             status += f"  - Сохранено в: {mwe_tokens_dir}/custom/\n\n"
+            status += f"📁 Путь к токенам: {mwe_tokens_dir}\n\n"
             status += "Теперь можно переходить к Шагу 3 - генерация изображений."
             
         except Exception as e:
@@ -792,7 +793,7 @@ def prepare_stackmix_tokens(data_dir, marking_csv_path, image_h, output_dir, num
         return f"Ошибка:\n{str(e)}\n\n{traceback.format_exc()}"
 
 
-def generate_images_from_corpus(data_dir, marking_csv_path, text_file, image_h, output_dir, num_samples):
+def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_file, image_h, output_dir, num_samples):
     """ШАГ 3: Генерирует изображения из корпуса текстов"""
     try:
         from src.stackmix import StackMix
@@ -800,7 +801,7 @@ def generate_images_from_corpus(data_dir, marking_csv_path, text_file, image_h, 
         import cv2
         
         # Проверяем токены
-        mwe_tokens_dir = Path(output_dir) / 'mwe_tokens'
+        mwe_tokens_dir = Path(tokens_dir)
         stackmix_csv = mwe_tokens_dir / 'custom' / 'stackmix.csv'
         
         if not stackmix_csv.exists():
@@ -1089,9 +1090,16 @@ with gr.Blocks(title="StackMix OCR Training") as app:
                     gen_num_workers = gr.Number(label="Num workers", value=8, precision=0)
                     gen_num_samples = gr.Number(label="Количество изображений", value=1000, precision=0)
                     
+                    gen_tokens_dir = gr.Textbox(
+                        label="Директория для токенов (Шаг 2)",
+                        value="./stackmix_tokens",
+                        info="Путь где будут сохранены токены"
+                    )
+                    
                     gen_output_dir = gr.Textbox(
-                        label="Директория для сохранения",
-                        value="./generated_data"
+                        label="Директория для изображений (Шаг 3)",
+                        value="./generated_data",
+                        info="Путь где будут сохранены сгенерированные изображения"
                     )
             
             gr.Markdown("---")
@@ -1155,7 +1163,7 @@ with gr.Blocks(title="StackMix OCR Training") as app:
         fn=prepare_stackmix_tokens,
         inputs=[
             gen_data_dir, gen_marking_csv,
-            gen_image_h, gen_num_workers
+            gen_image_h, gen_tokens_dir, gen_num_workers
         ],
         outputs=gen_status
     )
@@ -1163,8 +1171,8 @@ with gr.Blocks(title="StackMix OCR Training") as app:
     generate_images_btn.click(
         fn=generate_images_from_corpus,
         inputs=[
-            gen_data_dir, gen_text_file,
-            gen_image_h, gen_num_samples, gen_output_dir
+            gen_tokens_dir, gen_data_dir, gen_marking_csv, gen_text_file,
+            gen_image_h, gen_output_dir, gen_num_samples
         ],
         outputs=gen_status
     )
