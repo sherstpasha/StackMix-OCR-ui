@@ -891,7 +891,7 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
         status += f"Генерация {actual_samples} изображений...\n"
         
         generated = []
-        errors = 0
+        errors = []
         for i in range(actual_samples):
             try:
                 text, image = stackmix.run_corpus_stackmix()
@@ -904,8 +904,10 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
                         'text': text,
                         'stage': 'train'
                     })
+                else:
+                    errors.append(f"Попытка {i}: run_corpus_stackmix вернул None")
             except Exception as e:
-                errors += 1
+                errors.append(f"Попытка {i}: {type(e).__name__}: {str(e)}")
                 continue
         
         # Сохраняем разметку
@@ -916,10 +918,22 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
         status += f"\n✓ Генерация завершена!\n\n"
         status += f"📊 Результат:\n"
         status += f"  - Сгенерировано: {len(generated)} изображений\n"
-        status += f"  - Ошибок: {errors}\n"
-        status += f"  - Папка: {gen_dir}\n"
+        status += f"  - Ошибок: {len(errors)}\n"
+        
+        if errors:
+            status += f"\n⚠️ Ошибки:\n"
+            for err in errors[:5]:  # Показываем первые 5 ошибок
+                status += f"  - {err}\n"
+            if len(errors) > 5:
+                status += f"  ... и ещё {len(errors) - 5} ошибок\n"
+        
+        status += f"\n  - Папка: {gen_dir}\n"
         status += f"  - Разметка: {marking_path}\n\n"
-        status += "Сгенерированные данные готовы для обучения!"
+        
+        if len(generated) > 0:
+            status += "✅ Сгенерированные данные готовы для обучения!"
+        else:
+            status += "❌ Не удалось сгенерировать изображения! Проверьте ошибки выше."
         
         return status
         
