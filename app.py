@@ -892,27 +892,55 @@ def generate_images_from_corpus(tokens_dir, data_dir, marking_csv_path, text_fil
         gen_dir.mkdir(parents=True, exist_ok=True)
         
         actual_samples = min(int(num_samples), len(stackmix.corpus))
-        status += f"Генерация {actual_samples} изображений...\n"
+        status += f"Генерация {actual_samples} изображений (параллельно)...\n"
+        
+        # Параллельная генерация
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import random
+        
+        # Выбираем тексты заранее (чтобы избежать race condition)
+        selected_texts = [random.choice(stackmix.corpus) for _ in range(actual_samples)]
         
         generated = []
         errors = []
-        for i in range(actual_samples):
+        errors_lock = threading.Lock()
+        generated_lock = threading.Lock()
+        
+        def generate_single(idx, text):
+            """Генерирует одно изображение"""
             try:
-                text, image = stackmix.run_corpus_stackmix()
+                image = stackmix.run_stackmix(text)
                 if image is not None:
-                    img_path = gen_dir / f'gen_{i:05d}.png'
+                    img_path = gen_dir / f'gen_{idx:05d}.png'
                     imwrite_unicode(img_path, image)
-                    generated.append({
-                        'sample_id': i,
-                        'path': f'gen_{i:05d}.png',
+                    return {
+                        'sample_id': idx,
+                        'path': f'gen_{idx:05d}.png',
                         'text': text,
                         'stage': 'train'
-                    })
+                    }
                 else:
-                    errors.append(f"Попытка {i}: run_corpus_stackmix вернул None")
+                    return None, f"Попытка {idx}: run_stackmix вернул None"
             except Exception as e:
-                errors.append(f"Попытка {i}: {type(e).__name__}: {str(e)}")
-                continue
+                return None, f"Попытка {idx}: {type(e).__name__}: {str(e)}"
+        
+        num_workers = min(8, actual_samples)  # Не больше 8 воркеров
+        
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(generate_single, i, text): i 
+                      for i, text in enumerate(selected_texts)}
+            
+            for future in as_completed(futures):
+                result = future.result()
+                if isinstance(result, dict):
+                    with generated_lock:
+                        generated.append(result)
+                elif isinstance(result, tuple) and result[0] is None:
+                    with errors_lock:
+                        errors.append(result[1])
+        
+        # Сортируем по sample_id для консистентности
+        generated.sort(key=lambda x: x['sample_id'])
         
         # Сохраняем разметку
         gen_marking = pd.DataFrame(generated)
